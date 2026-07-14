@@ -99,7 +99,28 @@ app.get("/api/bookings/check", async (req, res) => {
   res.json({ isBooked: false });
 });
 
+// ৩. কোনো নির্দিষ্ট ইউজারের করা সমস্ত বুকিং ডাটা নিয়ে আসার API
+app.get("/api/bookings", async (req, res) => {
+  try {
+    const { userId } = req.query;
 
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId query parameter" });
+    }
+
+    // ডাটাবেজ থেকে ওই নির্দিষ্ট userId-এর সব বুকিং খোঁজা হচ্ছে
+    // বুকিংগুলোকে নতুন থেকে পুরাতন হিসেবে দেখানোর জন্য bookedAt অনুযায়ী সর্ট (-1) করা হয়েছে
+    const bookings = await bookingsCollection
+      .find({ userId: userId })
+      .sort({ bookedAt: -1 })
+      .toArray();
+
+    res.json(bookings);
+  } catch (error) {
+    console.error("Error fetching user bookings:", error);
+    res.status(500).json({ error: "Internal Server Error", message: error.message });
+  }
+});
 
     app.get("/events", async (req, res) => {
 
