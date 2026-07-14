@@ -34,6 +34,72 @@ async function run() {
   try {
     const db = client.db("event-hive_db");
     const eventsCollection = db.collection("events");
+    const subscriptionCollection= db.collection("subscription");
+    const userCollection = db.collection("user");
+    const bookingsCollection = db.collection("bookings");
+
+
+    app.post("/subscription", async (req, res) => {
+      const {userId, priceId, sessionId} = req.body;
+
+      const isExist=await subscriptionCollection.findOne({sessionId})
+      if(isExist){
+        return res.json({massage:"Already isExist"})
+      }
+
+       await subscriptionCollection.insertOne({
+        sessionId,
+        userId,
+        priceId
+      });
+      // update user role
+
+      await userCollection.updateOne(
+        {_id:new ObjectId(userId)},
+        {$set: {plan:"pro"}}
+      );
+      res.json({massage:"payment Success Full"})
+    });
+
+
+    // ১. টিকিট বুকিং করার API
+app.post("/api/bookings", async (req, res) => {
+  try {
+    const { eventId, eventTitle, userId, userEmail, userName, ticketCount, totalPrice } = req.body;
+
+    if (!eventId || !userEmail) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const newBooking = {
+      eventId,
+      eventTitle,
+      userId,
+      userEmail,
+      userName,
+      ticketCount: parseInt(ticketCount),
+      totalPrice: parseFloat(totalPrice),
+      bookedAt: new Date()
+    };
+
+    await bookingsCollection.insertOne(newBooking);
+    res.status(201).json({ success: true, message: "Ticket booked successfully!" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ২. কোনো নির্দিষ্ট ইউজার এই ইভেন্টের টিকিট কেটেছে কিনা তা চেক করার API
+app.get("/api/bookings/check", async (req, res) => {
+  const { eventId, userEmail } = req.query;
+  const booking = await bookingsCollection.findOne({ eventId, userEmail });
+  if (booking) {
+    return res.json({ isBooked: true });
+  }
+  res.json({ isBooked: false });
+});
+
+
 
     app.get("/events", async (req, res) => {
 
@@ -43,16 +109,34 @@ async function run() {
       res.send(results);
     })
 
-    app.get("/events/:eventsId", async (req, res) => {
+    // আপনার এক্সপ্রেস অ্যাপের ফাইলটিতে এটি আপডেট করুন
+app.get("/events/:eventsId", async (req, res) => {
+    try {
+        const { eventsId } = req.params;
 
-      // const eventsId = req.params.eventsId;
-      const { eventsId } = req.params;
-      const query = {_id: new ObjectId(eventsId)};
-      const result = await eventsCollection.findOne(query);
+        // ১. আইডিটি মঙ্গোডিবির ObjectId ফরম্যাটের সাথে মিলছে কিনা চেক (২৪ ক্যারেক্টার)
+        if (!eventsId || eventsId.length !== 24) {
+            return res.status(400).send({ message: "Invalid ID format" });
+        }
 
-      res.send(result);
+        // ২. কুয়েরি তৈরি এবং ডাটা খোঁজা
+        const query = { _id: new ObjectId(eventsId) };
+        const result = await eventsCollection.findOne(query);
 
-    })
+        // ৩. ডাটা না পাওয়া গেলে ৪MD৪ পাঠানো
+        if (!result) {
+            return res.status(404).send({ message: "Event not found" });
+        }
+
+        // ৪. সফল হলে ডাটা পাঠানো
+        res.send(result);
+        
+    } catch (error) {
+        // ব্যাকএন্ড টার্মিনালে আসল সমস্যাটি দেখতে এটি সাহায্য করবে
+        console.error("Backend Error Details:", error); 
+        res.status(500).send({ message: "Internal Server Error", error: error.message });
+    }
+});
   
     console.log("⚡️ [database]: Pinged your deployment. You successfully connected to MongoDB!");
     
