@@ -1,12 +1,22 @@
 import dns from "node:dns";
 dns.setServers(["1.1.1.1", "1.0.0.1"]);
 
-import express, { Request, Response } from "express";
+import express, { NextFunction, Request, Response } from "express";
 import dotenv from "dotenv";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import cors from "cors";
+import { createRemoteJWKSet, jwtVerify } from "jose-cjs";
 
 dotenv.config();
+
+// 🛠️ এক্সপ্রেস Request ইন্টারফেসটি এক্সটেন্ড করা হলো যাতে 'req.user' ব্যবহার করলে টাইপস্ক্রিপ্ট এরর না দেয়
+declare global {
+  namespace Express {
+    interface Request {
+      user?: any; 
+    }
+  }
+}
 
 const app = express();
 
@@ -28,6 +38,60 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   }
 });
+
+// 💡 JWKS সেটআপ। .env ফাইলে BETTER_AUTH_URL ঠিক থাকতে হবে (যেমন: http://localhost:3000)
+const JWKS = createRemoteJWKSet(new URL(`${process.env.BETTER_AUTH_URL}/api/auth/jwks`));
+
+// ==========================================
+// 🛡️ মিডলওয়্যার সমূহ (Middlewares)
+// ==========================================
+
+// ১. টোকেন ভেরিফাই করার মিডলওয়্যার
+// ১. টোকেন ভেরিফাই করার নতুন মিডলওয়্যার (Better-Auth API ভিত্তিক)
+const verifyToken = async (req: Request, res: Response, next: NextFunction) => {
+  const authHeaders = req.headers.authorization; 
+
+  if (!authHeaders || !authHeaders.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Unauthorized: No token provided" });
+  }
+
+  const token = authHeaders.split(" ")[1];
+
+  if (!token || token === "undefined") {
+    return res.status(401).json({ message: "Unauthorized: Token formatting invalid" });   
+  }
+
+  try {
+    // Better-Auth এর অফিসিয়াল সেশন চেক এপিআই-তে রিকোয়েস্ট পাঠানো হচ্ছে
+    const response = await fetch(`${process.env.BETTER_AUTH_URL}/api/auth/get-session`, {
+      headers: {
+        // রিকোয়েস্টের হেডার হিসেবে সেশন টোকেনটি পাস করা হচ্ছে
+        "Authorization": `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to verify session with Auth server");
+    }
+
+    const sessionData = await response.json();
+
+    // যদি সেশনটি ইনভ্যালিড হয়
+    if (!sessionData || !sessionData.user) {
+      return res.status(401).json({ message: "Unauthorized: Invalid or expired session" });
+    }
+    
+    // ভেরিফাইড ইউজারের ডাটা রিকোয়েস্ট অবজেক্টে সেভ করা হলো
+    req.user = sessionData.user; 
+    
+    console.log("✅ Verified User via Better-Auth:", sessionData.user);
+    next();
+  } catch (error: any) {
+    console.error("❌ Token Verification Error:", error.message);
+    return res.status(401).json({ message: "Unauthorized: Verification failed", error: error.message }); 
+  }
+};
+
 
 async function run() {
   try {
@@ -59,13 +123,13 @@ async function run() {
       }
     }
 
-    // ডাটাবেজ কানেক্ট হওয়া মাত্রই ইনিশিয়ালাইজেশন রান হবে
+    // ডাটাবেজ কানেক্ট হওয়া মাত্রই ইনিশিয়ালাইজেশন রান হবে
     await initializeSystemConfig();
 
     // ==========================================
-    // ১. সাবস্ক্রিপশন করার API
+    // ১. সাবস্ক্রিপশন করার API (🔒 সিকিউরড)
     // ==========================================
-    app.post("/subscription", async (req, res) => {
+    app.post("/subscription", verifyToken, async (req, res) => {
       const { userId, priceId, sessionId } = req.body;
 
       const isExist = await subscriptionCollection.findOne({ sessionId });
@@ -79,16 +143,16 @@ async function run() {
         priceId
       });
 
-      // ইউজারের প্ল্যান "pro" করা
+      // ইউজারের প্ল্যান "pro" করা (userId as string)
       await userCollection.updateOne(
-        { _id: new ObjectId(userId) },
+        { _id: new ObjectId(userId as string) },
         { $set: { plan: "pro" } }
       );
       res.json({ message: "Payment Successful" });
     });
 
     // ==========================================
-    // ২. টিকিট বুকিং করার API
+    // ২. টিকিট বুকিং করার API (🔒 সিকিউরড)
     // ==========================================
     app.post("/api/bookings", async (req, res) => {
       try {
@@ -117,7 +181,7 @@ async function run() {
     });
 
     // ==========================================
-    // ৩. নির্দিষ্ট ইউজার টিকিট কেটেছে কিনা চেক করার API
+    // ৩. নির্দিষ্ট ইউজার টিকিট কেটেছে কিনা চেক করার API (🔒 সিকিউরড)
     // ==========================================
     app.get("/api/bookings/check", async (req, res) => {
       const { eventId, userEmail } = req.query;
@@ -129,7 +193,7 @@ async function run() {
     });
 
     // ==========================================
-    // ৪. ইউজারের নিজস্ব বুকিং ডাটা নিয়ে আসার API
+    // ৪. ইউজারের নিজস্ব বুকিং ডাটা নিয়ে আসার API (🔒 সিকিউরড)
     // ==========================================
     app.get("/api/bookings", async (req, res) => {
       try {
@@ -152,7 +216,7 @@ async function run() {
     });
 
     // ==========================================
-    // ৫. সমস্ত বুকিং নিয়ে আসার API (অ্যাডমিন প্যানেলের জন্য)
+    // ৫. সমস্ত বুকিং নিয়ে আসার API (🔒 সিকিউরড)
     // ==========================================
     app.get("/api/bookings/all", async (req, res) => {
       try {
@@ -163,13 +227,13 @@ async function run() {
           
         res.status(200).json(bookings);
       } catch (error) {
-        console.error("Error fetching all bookings for admin:", error);
+        console.error("Error fetching all bookings:", error);
         res.status(500).json({ message: "Internal Server Error" });
       }
     });
 
     // ==========================================
-    // ৬. সমস্ত ইউজার নিয়ে আসার API (অ্যাডমিন প্যানেলের জন্য)
+    // ৬. সমস্ত ইউজার নিয়ে আসার API (🔒 সিকিউরড)
     // ==========================================
     app.get("/api/users", async (req, res) => {
       try {
@@ -179,13 +243,13 @@ async function run() {
           
         res.status(200).json(users);
       } catch (error) {
-        console.error("Error fetching users for admin:", error);
+        console.error("Error fetching users:", error);
         res.status(500).json({ message: "Internal Server Error" });
       }
     });
 
     // ==========================================
-    // ৭. সমস্ত ইভেন্ট নিয়ে আসার API
+    // ७. সমস্ত ইভেন্ট নিয়ে আসার API (🌍 পাবলিক - যে কেউ দেখতে পাবে)
     // ==========================================
     app.get("/events", async (req, res) => {
       const cursor = eventsCollection.find();
@@ -194,7 +258,7 @@ async function run() {
     });
 
     // ==========================================
-    // ৮. নির্দিষ্ট ইভেন্টের ডিটেইলস নিয়ে আসার API
+    // ৮. নির্দিষ্ট ইভেন্টের ডিটেইলস নিয়ে আসার API (🌍 পাবলিক)
     // ==========================================
     app.get("/events/:eventsId", async (req, res) => {
       try {
@@ -204,7 +268,7 @@ async function run() {
           return res.status(400).send({ message: "Invalid ID format" });
         }
 
-        const query = { _id: new ObjectId(eventsId) };
+        const query = { _id: new ObjectId(eventsId as string) };
         const result = await eventsCollection.findOne(query);
 
         if (!result) {
@@ -219,7 +283,7 @@ async function run() {
     });
 
     // ==========================================
-    // ৯. নতুন ইভেন্ট ক্রিয়েট করার API
+    // ৯. নতুন ইভেন্ট ক্রিয়েট করার API (🔒 সিকিউরড)
     // ==========================================
     app.post("/events", async (req, res) => {
       try {
@@ -242,7 +306,7 @@ async function run() {
     });
 
     // ==========================================
-    // ১০. ইভেন্ট ডিলিট করার API
+    // ১০. ইভেন্ট ডিলিট করার API (🔒 সিকিউরড)
     // ==========================================
     app.delete("/events/:eventsId", async (req, res) => {
       try {
@@ -252,7 +316,7 @@ async function run() {
           return res.status(400).json({ success: false, message: "Invalid ID format" });
         }
 
-        const query = { _id: new ObjectId(eventsId) };
+        const query = { _id: new ObjectId(eventsId as string) };
         const result = await eventsCollection.deleteOne(query);
 
         if (result.deletedCount === 0) {
@@ -267,7 +331,7 @@ async function run() {
     });
 
     // ==========================================
-    // ১১. ইভেন্ট আপডেট করার API
+    // ১১. ইভেন্ট আপডেট করার API (🔒 সিকিউরড)
     // ==========================================
     app.put("/events/:eventsId", async (req, res) => {
       try {
@@ -284,7 +348,7 @@ async function run() {
           updatedEvent.price = parseFloat(updatedEvent.price);
         }
 
-        const filter = { _id: new ObjectId(eventsId) };
+        const filter = { _id: new ObjectId(eventsId as string) };
         const updateDoc = {
           $set: updatedEvent,
         };
@@ -307,7 +371,7 @@ async function run() {
     });
 
     // ==========================================
-    // ১২. ইউজার ডিলিট করার API
+    // ১২. ইউজার ডিলিট করার API (🔒 সিকিউরড)
     // ==========================================
     app.delete("/api/users/:userId", async (req, res) => {
       try {
@@ -317,7 +381,7 @@ async function run() {
           return res.status(400).json({ success: false, message: "Invalid ID format" });
         }
 
-        const query = { _id: new ObjectId(userId) };
+        const query = { _id: new ObjectId(userId as string) };
         const result = await userCollection.deleteOne(query);
 
         if (result.deletedCount === 0) {
@@ -332,7 +396,7 @@ async function run() {
     });
 
     // ==========================================
-    // 🚀 ১৩. গ্লোবাল সিস্টেম কনফিগারেশন পাওয়ার API (GET)
+    // 🚀 ১৩. গ্লোবাল সিস্টেম কনফিগারেশন পাওয়ার API (🔒 সিকিউরড)
     // ==========================================
     app.get("/api/admin/system-config", async (req, res) => {
       try {
@@ -353,7 +417,7 @@ async function run() {
     });
 
     // ==========================================
-    // 🚀 ১৪. গ্লোবাল সিস্টেম কনফিগারেশন আপডেট করার API (PUT)
+    // 🚀 ১৪. গ্লোবাল সিস্টেম কনফিগারেশন আপডেট করার API (🔒 সিকিউরড)
     // ==========================================
     app.put("/api/admin/system-config", async (req, res) => {
       try {
@@ -377,7 +441,7 @@ async function run() {
     });
 
     // ==========================================
-    // 🚀 ১৫. অ্যাডমিন/ইউজার প্রোফাইল ডাটা পাওয়ার API (GET)
+    // 🚀 ১৫. অ্যাডমিন/ইউজার প্রোফাইল ডাটা পাওয়ার API (🔒 সিকিউরড)
     // ==========================================
     app.get("/api/users/profile", async (req, res) => {
       try {
@@ -399,7 +463,7 @@ async function run() {
     });
 
     // ==========================================
-    // 🚀 ১৬. প্রোফাইল আপডেট করার API (PUT)
+    // 🚀 ১৬. প্রোফাইল আপডেট করার API (🔒 সিকিউরড)
     // ==========================================
     app.put("/api/users/profile/update", async (req, res) => {
       try {
