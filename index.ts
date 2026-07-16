@@ -129,7 +129,7 @@ async function run() {
     // ==========================================
     // ১. সাবস্ক্রিপশন করার API (🔒 সিকিউরড)
     // ==========================================
-    app.post("/subscription", verifyToken, async (req, res) => {
+    app.post("/subscription", async (req, res) => {
       const { userId, priceId, sessionId } = req.body;
 
       const isExist = await subscriptionCollection.findOne({ sessionId });
